@@ -1,0 +1,377 @@
+---
+title: "Projekt na 'Metody statystyczne i analityczne Big Data' - Michał Grabicki"
+author: "Michał Grabicki"
+date: "7 01 2021"
+output: html_document
+---
+## Cel:
+Budowa modeli klasyfikacyji przy pomocy regresji logistycznej, metodzie KNN oraz NN
+w celu ustalenia, czy rak piersi jest łagodny, czy złośliwy. Sprawdzenie skutecznosci modeli.
+
+
+## Ładowanie bibliotek.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(plotly)
+library(corrplot)
+library(devtools)
+library(gmodels)
+library(caret)
+library(class)
+library(dplyr)
+library(neuralnet)
+
+```
+
+## Wczytywanie danych. 
+
+```{r}
+
+wdbc<- read_csv("wdbc.csv", skip = 1,
+# Zmieniam nazwy kolumn na bardziej czytelne. 
+                col_names= c("id","diagnosis","radius_mean","texture_mean","perimeter_mean",
+                 "area_mean","smoothness_mean","compactness_mean","concavity_mean",
+                 "concave_points_mean","symmetry_mean","fractal_dimension_mean",
+                 "radius_se","texture_se","perimeter_se","area_se","smoothness_se",
+                 "compactness_se","concavity_se","concave_points_se","symmetry_se",
+                 "fractal_dimension_se","radius_worst","texture_worst","perimeter_worst",
+                 "area_worst","smoothness_worst","compactness_worst","concavity_worst",
+                 "concave_points_worst","symmetry_worst","fractal_dimension_worst"))
+
+# Usuwam zbedna zmienna "id".
+wdbc <- select(wdbc, -1)
+
+# Sprawdzam ilosc kolumn, strukture danych oraz glowne statystyki zbioru.
+ncol(wdbc)
+str(wdbc)
+summary(wdbc)
+
+```
+Zbior sklada sie z 30 zmiennych objasniajacych i 1 zmiennej objasnianej "diagnosis". Zbior jest czysty, to jest nie posiada brakow w danych.
+
+##Kategoryzacja zmiennej zależnej.
+```{r pressure, echo=FALSE}
+# Kategoryzacja zmiennej zależnej.
+
+wdbc$diagnosis <- factor(wdbc$diagnosis, levels = c("B", "M"),
+                         labels = c("0", "1"))
+
+wdbc$diagnosis <- as.numeric(as.character(wdbc$diagnosis))
+
+# Ponownie sprawdzam podstawowe cechy zbioru.
+str(wdbc)
+table(wdbc$diagnosis)
+prop.table(table(wdbc$diagnosis))
+summary(wdbc)
+
+```
+
+#Macież korelacji.
+```{r}
+cor_matrix <- cor(select(wdbc,-1))
+
+corrplot(cor_matrix,order = "hclust", tl.cex = 1, addrect = 8)
+```
+##Eliminacja zmiennych silnie skorelowanych na podstawie macieży korelacji. 
+```{r}
+wdbc2 <- wdbc %>% select(-findCorrelation(cor_matrix, cutoff = 0.9))
+#Ponownie sprawdzam strukture danych
+str(wdbc2)
+ncol(wdbc2)
+summary(wdbc2)
+
+# Usuwam zmienna diagnozis wiec pownownie dodaje ja do zbioru znormalizowanego
+wdbc2 <- cbind.data.frame(wdbc$diagnosis,wdbc2)
+colnames(wdbc2)[colnames(wdbc2) == "wdbc$diagnosis"] <- "diagnosis"
+
+ncol(wdbc2)
+str(wdbc2)
+
+```
+
+##Podzial zbioru na treningowy 80% i testowy 20% (w sposób losowy).
+```{r}
+# Tworze zbiór treningowy i testowy ze zmiennych niezależnych
+
+set.seed(1234)
+wdbc_random <- createDataPartition(wdbc2$diagnosis, p=0.8, list = FALSE)
+
+wdbc_train <- wdbc2[wdbc_random,]
+wdbc_test <- wdbc2[-wdbc_random,]
+# Sprawdzam rozklad zmiennej diagnosis 
+table(wdbc_train$diagnosis)
+table(wdbc_test$diagnosis)
+
+# Usuwam zmienna diagnosis ze zbioru treningowego i testowego - do knn ze wszsytkimi zmiennymi
+wdbc_train_knn_all_v <- wdbc_train[-1]
+wdbc_test_knn_all_v <- wdbc_test[-1]
+
+# Tworze zbiór treningowy i testowy ze zmiennej zależnej - do knn
+wdbc_train_labels <- wdbc2[wdbc_random, 1]
+wdbc_test_labels <- wdbc2[-wdbc_random, 1]
+
+prop.table(table(wdbc_train_labels))
+prop.table(table(wdbc_test_labels))
+```
+
+##Regresja logistyczna.
+```{r}
+# Rozpoczynam trening modelu regresji logistycznej
+set.seed(1234)
+wdbc_reg_log<- glm(data = wdbc_train, formula = diagnosis ~ ., family = binomial(link = "logit"))
+summary(wdbc_reg_log)
+
+```
+##Ocena modelu regresji logistycznej.
+```{r}
+##Przepuszczam dane przez model.
+res_log <-predict(wdbc_reg_log, wdbc_train, type = "respons")
+
+#Confusion Matrix
+confMatrix <- table(Actual_Value=wdbc_train$diagnosis,Predicted_value= res_log > 0.5)
+confMatrix
+
+#Badam Accuracy
+(confMatrix[[1,1]]+ confMatrix[[2,2]]) / sum(confMatrix)
+
+```
+Accuracy=0.9802632
+
+##Normalizacja danych. Zmienne sa w roznych skalach.
+```{r}
+# Tworzę funkcję normalizującą zmienne
+normalize <- function(x) {
+  return((x - min(x)) / (max(x) - min(x)))
+}
+# Normalizuje zbior danych
+wdbc_normalized <- as.data.frame(lapply(wdbc2[1:ncol(wdbc2)], normalize))
+
+# Normalizuje rownież cay zbior danych
+wdbc_normalized_all_v <- as.data.frame(lapply(wdbc[1:ncol(wdbc)], normalize))
+
+
+# Tworze nowe zbiory treningowy i testowy 
+wdbc_train_normalized <- wdbc_normalized[wdbc_random,]
+wdbc_test_normalized <- wdbc_normalized[-wdbc_random,]
+
+# Tworze zbiór treningowy i testowy ze zmiennej zależnej - do knn
+wdbc_train_labels <- wdbc2[wdbc_random, 1]
+wdbc_test_labels <- wdbc2[-wdbc_random, 1]
+
+# Usuwam zmienna diagnosis ze zbioru treningowego i testowego - do knn
+wdbc_train_knn <- wdbc_train_normalized[-1]
+wdbc_test_knn <- wdbc_test_normalized[-1]
+
+# Tworze zbior i usuwam zmienna diagnosis ze zbioru treningowego i testowego - do knn ze wszsytkimi zmiennymi
+wdbc_train_knn_all_v <- wdbc_normalized_all_v[wdbc_random,-1]
+wdbc_test_knn_all_v <- wdbc_normalized_all_v[-wdbc_random,]
+wdbc_test_knn_all_v <- wdbc_test_knn_all_v[-1]
+
+
+prop.table(table(wdbc_train_labels))
+prop.table(table(wdbc_test_labels))
+```
+
+##Regresja logistyczna na zbiorze znormalizowanym.
+```{r}
+# Rozpoczynam trening modelu regresji logistycznej na zbiorze znormalizowanym
+set.seed(1234)
+wdbc_reg_log_normalized<- glm(data = wdbc_train_normalized, formula = diagnosis ~ ., family = binomial(link = "logit"))
+summary(wdbc_reg_log_normalized)
+
+```
+
+##Ocena modelu regresji logistycznej na zbiorze znormalizowanym.
+```{r}
+##Przepuszczam dane przez model.
+res_log_n <-predict(wdbc_reg_log_normalized, wdbc_train_normalized, type = "respons")
+
+#Confusion Matrix
+confMatrix_log_n <- table(Actual_Value=wdbc_train_normalized$diagnosis,Predicted_value= res_log_n > 0.5)
+confMatrix_log_n
+
+#Badam Accuracy
+(confMatrix_log_n[[1,1]]+ confMatrix_log_n[[2,2]]) / sum(confMatrix_log_n)
+
+
+```
+W przypadku regresji logistycznej "normalizacja" nie zmienia wyników modelu. 
+
+##Regrecja logistyczna na zbiorze znormalizowanym po usunieciu nieistotnych zmiennych.
+```{r}
+# Rozpoczynam trening modelu regresji logistycznej na zbiorze znormalizowanym po usunieciu nieistotnych zmiennych.
+set.seed(1234)
+wdbc_reg_log_normalized2<- glm(data = wdbc_train_normalized, formula = diagnosis ~ smoothness_mean  + concave_points_mean + symmetry_worst, family = binomial(link = "logit"))
+summary(wdbc_reg_log_normalized2)
+
+```
+
+##Ocena modelu regresji logistycznej na zbiorze znormalizowanym po usunieciu nieistotnych zmiennych.
+```{r}
+##Przepuszczam dane przez model.
+res_log_n2 <-predict(wdbc_reg_log_normalized2, wdbc_train_normalized, type = "respons")
+
+#Confusion Matrix
+confMatrix_log_n <- table(Actual_Value=wdbc_train_normalized$diagnosis,Predicted_value= res_log_n2 > 0.5)
+confMatrix_log_n
+
+#Badam Accuracy
+(confMatrix_log_n[[1,1]]+ confMatrix_log_n[[2,2]]) / sum(confMatrix_log_n)
+
+```
+W przypadku regresji logistycznej usuniecie malo istotnych zmiennych obniża jakosc wyników modelu. Accuracy zmalalo o 6.8%.
+
+#KNN - K najbliższych sasiadów na zbiorze znormalizowanym.
+```{r}
+#ustalam wartosc k
+k <- round(sqrt(nrow(wdbc_train_normalized)),0)
+
+##21 - to sporo, jesli proces bedzie zbyt dlugi bedzie mozna sprobowac zmniejszyc wartosc k.
+wbcd_knn_pred_k21 <- knn(train = wdbc_train_knn, test = wdbc_test_knn,
+                     cl = wdbc_train_labels, k = k)
+
+
+##KNN z k zmniejszonym o 50% - k=11
+wbcd_knn_pred_k11 <- knn(train = wdbc_train_knn, test = wdbc_test_knn,
+                     cl = wdbc_train_labels, k = 11)
+
+##KNN z k ponownie zmniejszonym o 50% - k=5
+wbcd_knn_pred_k5 <- knn(train = wdbc_train_knn, test = wdbc_test_knn,
+                     cl = wdbc_train_labels, k = 5)
+
+```
+
+##Ocena modelu KNN.
+```{r}
+# tworzymy macierz pomyłek dla metody KNN z k=21
+CrossTable(x = wdbc_test_labels, y = wbcd_knn_pred_k21,
+           prop.chisq = FALSE)
+
+#Macież pomylek dla KNN z k=21
+xtab_k21 <- table(wbcd_knn_pred_k21, wdbc_test_labels)
+confusionMatrix(xtab_k21)
+
+# tworzymy macierz pomyłek dla metody KNN z k=11
+CrossTable(x = wdbc_test_labels, y = wbcd_knn_pred_k11,
+           prop.chisq = FALSE)
+
+xtab_k11 <- table(wbcd_knn_pred_k11, wdbc_test_labels)
+#Macież pomylek dla KNN z k=11
+confusionMatrix(xtab_k11)
+
+# tworzymy macierz pomyłek dla metody KNN z k=5
+CrossTable(x = wdbc_test_labels, y = wbcd_knn_pred_k5,
+           prop.chisq = FALSE)
+
+xtab_k5 <- table(wbcd_knn_pred_k5, wdbc_test_labels)
+#Macież pomylek dla KNN z k=5
+confusionMatrix(xtab_k5)
+
+```
+KNN z k=21 pomimo najwiekszeg k posiada najniższe Accuracy=0.9292 jednoczesnie posiadajac najnizsze Sensitivity=0.9469 i Specificity = 0.8421  sposród testowanych modeli wykorzystujacych metode KNN. Miedzy modelami z k=11 i k=5 istnieje niewielka różnica na korzysc modelu z k=11 z Accuracy=0.9292 jednoczesnie posiadajac najnizsze Sensitivity=0.9867 i Specificity = 0.8684.
+
+##KNN - ze wszsystkimi zmiennymi
+```{r}
+
+##KNN z optymalnym k sposród poprzednio testowanych modeli - k=11
+wbcd_knn_pred_k11_all_v <- knn(train = wdbc_train_knn_all_v, test = wdbc_test_knn_all_v,
+                     cl = wdbc_train_labels, k = 11)
+
+##KNN z k ponownie zmniejszonym o 50% - k=5
+wbcd_knn_pred_k5_all_v <- knn(train = wdbc_train_knn_all_v, test = wdbc_test_knn_all_v,
+                     cl = wdbc_train_labels, k = 5)
+
+
+```
+
+
+##Ocena modelu KNN ze wszsystkimi zmiennymi. 
+```{r}
+# Tworze macierz pomyłek dla metody KNN z k=11 i wszsytkimi zmiennymi
+CrossTable(x = wdbc_test_labels, y = wbcd_knn_pred_k11_all_v,
+           prop.chisq = FALSE)
+
+
+xtab_k11_all_v <- table(wbcd_knn_pred_k11_all_v, wdbc_test_labels)
+confusionMatrix(xtab_k11_all_v)
+
+# Tworze macierz pomyłek dla metody KNN z k=5 i wszsytkimi zmiennymi
+CrossTable(x = wdbc_test_labels, y = wbcd_knn_pred_k11_all_v,
+           prop.chisq = FALSE)
+
+
+xtab_k5_all_v <- table(wbcd_knn_pred_k5_all_v, wdbc_test_labels)
+confusionMatrix(xtab_k5_all_v)
+
+```
+Ze wszsytkich modeli bazujacych na KNN z model z k=11  wypada najlepiej, posiadajac najwyższe Accuracy=0.9646 jednoczesnie posiadajac najnizsze Sensitivity=0.9867 i Specificity = 0.9211. 
+
+
+#Neural Network - na zbiorze znormalizowanym
+```{r}
+# Buduję model oparty na ANN
+set.seed(1234)
+wbcd_nn <- neuralnet(formula = diagnosis ~ .,
+                              data = wdbc_train_normalized)
+# Topologia sieci
+plot(wbcd_nn)
+
+```
+#Ocena modelu Neural Network. 
+```{r}
+# Sprawdzam działanie modelu na zbiorze testowym.
+wbcd_nn_model_results <- neuralnet::compute(wbcd_nn, wdbc_test_normalized[2:22])
+
+# Zapisuje przewidziane wartości diagnosis do zmiennej.
+predicted_diagnosis <- wbcd_nn_model_results$net.result
+
+# Sprawdzam jakość modelu obliczając korelację pomiędzy
+#przewidzianą a rzeczywistą wartością diagnosis
+cor(predicted_diagnosis, wbcd_nn_model_results$diagnosis)
+
+# Sprawdzam oszacowanie modelu
+estimate_nn <-round(wbcd_nn_model_results$net.result)
+
+# Accuracy
+mean(estimate_nn == wdbc_test_labels)
+
+```
+
+#Neural Network - na zbiorze znormalizowanym z warstwa ukryta z dwoma neronami.
+```{r}
+# Buduję model oparty na ANN z warstwa ukryta z pięcioma neronami
+set.seed(1234)
+wbcd_nn_h2 <- neuralnet(formula = diagnosis ~ .,
+                              data = wdbc_train_normalized, hidden = 2)
+# Topologia sieci
+plot(wbcd_nn_h2)
+
+```
+
+#Ocena modelu Neural Network z warstwa ukryta z dwoma neronami.
+```{r}
+# Sprawdzam działanie modelu na zbiorze testowym.
+wbcd_nn_h2_model_results <- neuralnet::compute(wbcd_nn_h2, wdbc_test_normalized[2:22])
+
+# Zapisuje przewidziane wartości diagnosis do zmiennej.
+predicted_diagnosis_h2 <- wbcd_nn_h5_model_results$net.result
+
+# Sprawdzam jakość modelu obliczając korelację pomiędzy
+#przewidzianą a rzeczywistą wartością diagnosis
+cor(predicted_diagnosis_h2, wbcd_nn_h5_model_results$diagnosis)
+
+# Sprawdzam oszacowanie modelu
+estimate_nn_h2 <-round(wbcd_nn_h2_model_results$net.result)
+
+# Accuracy
+mean(estimate_nn_h2 == wdbc_test_labels)
+
+```
+Wsród modeli bazujacych na NN najlwyższe Accuracy posiada model z jedna warstwa ukryta (przetestowanych zostalo pare ustawien z roznymi ilosciami warstm ktore nie zostaly zawarte w kodzie). Model posiada Accuracy = 0.9646018. 
+
+##Podsumowanie:
+Z wszsytkich przetestowanych modeli najwyższe (i równe) dopasowanie posiadaja modele regresji liniowej na zbiorze znormalizowanym oraz na zbiorze bez normalizacji (Accuracy=0.9802632)
+W przypadku wszsytkich pozostalych modeli mozna rownież uznac, iż sa dobrze dopasowane, ponieważ wszsytkie posiadaja Accuracy > 0.9.
+
